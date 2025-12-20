@@ -102,7 +102,6 @@ fn disk_stats_for_path(path: &PathBuf) -> (u64, u64) {
 
     for d in disks.list() {
         let mount = d.mount_point();
-
         if path.starts_with(mount) {
             let prefix_len = mount.as_os_str().len();
             let avail_mb = bytes_to_mb(d.available_space());
