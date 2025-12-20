@@ -20,6 +20,18 @@ struct ResourceReport{
     disk_path: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct RegisterRequest{
+    agent_id: String,
+    agent_url: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HeartBeatRequest{
+    agent_id: String,
+    resources: Option<ResourceReport>,
+}
+
 #[derive(Clone)]
 struct AppState {
     disk_path: PathBuf
@@ -35,6 +47,11 @@ async fn main(){
     // Loading Config
     let host = std::env::var("AGENT_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = std::env::var("AGENT_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(7001);
+    let hub_url = std::env::var("HUB_URL").ok();
+    let hub_api_key = std::env::var("HUB_API_KEY").ok();
+    let agent_id = std::env::var("AGENT_ID").ok();
+    let agent_public_url = std::env::var("AGENT_PUBLIC_URL").ok();
+
     let disk_path_raw  = std::env::var("AGENT_DISK_PATH").unwrap_or_else(|_| "/".to_string());
 
     let disk_path = PathBuf::from(disk_path_raw);
@@ -53,6 +70,25 @@ async fn main(){
     let state = AppState {
         disk_path: disk_path,
     };
+
+    // Launching heartbeat and request registering
+    if let (
+        Some(hub_url), 
+        Some(hub_api_key),
+        Some(agent_id),
+        Some(agent_public_url)
+    ) = (hub_url, hub_api_key, agent_id, agent_public_url) {
+        
+        spawn_hub_register_and_heartbeat(
+            hub_url,
+            hub_api_key,
+            agent_id,
+            agent_public_url,
+            state.clone(),
+        );
+    }else{
+        tracing::warn!("HUB_URL/HUB_API_KEY/AGENT_ID/AGENT_PUBLIC_URL not set; skipping hub discovery");
+    }
 
     let app = Router::new()
     .route("/ping", get(ping))
@@ -76,6 +112,10 @@ async fn health() -> Json<HealthResponse> {
 }
 
 async fn resources(State(state): State<AppState>) -> Json<ResourceReport> {
+    return Json(collect_resources(&state).await);
+}
+
+async fn collect_resources(state: &AppState) -> ResourceReport {
     // Collect system information
     let mut sys = System::new_all();
     sys.refresh_all();
@@ -86,13 +126,14 @@ async fn resources(State(state): State<AppState>) -> Json<ResourceReport> {
 
     let (disk_free_mb, disk_total_mb) = disk_stats_for_path(&state.disk_path);
 
-    return Json(ResourceReport { ram_total_mb, 
+    return ResourceReport { 
+        ram_total_mb, 
         ram_free_mb, 
         cpu_cores,
         disk_free_mb, 
         disk_total_mb, 
         disk_path: state.disk_path.display().to_string(),
-    });
+    };
 }
 
 fn disk_stats_for_path(path: &PathBuf) -> (u64, u64) {
@@ -131,4 +172,67 @@ fn kb_to_mb(kb: u64) -> u64 {
 
 fn bytes_to_mb(bytes: u64) -> u64 {
     return bytes / (1 << 20);
+}
+
+fn spawn_hub_register_and_heartbeat (
+    hub_url: String,
+    api_key: String,
+    agent_id: String,
+    agent_public_url: String,
+    state: AppState
+ ) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("reqwest client");
+        
+        // Register client with retries
+        let register_url = format!("{}/v1/agents/register", hub_url);
+        loop {
+            let resp = client
+                .post(&register_url)
+                .header("x-api-key", &api_key)
+                .json(&RegisterRequest{
+                    agent_id: agent_id.clone(),
+                    agent_url: agent_public_url.clone(),
+                })
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    tracing::info!("registered to hub: {} -> {}", agent_id, agent_public_url);
+                    break;
+                }
+                Ok(r) => tracing::warn!("hub register failed: {}", r.status()),
+                Err(e) => tracing::warn!("hub register error: {}", e),
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        let heartbeat_url = format!("{}/v1/agents/heartbeat", hub_url);
+        loop {
+            let report = collect_resources(&state).await;
+
+            let resp = client
+                .post(&heartbeat_url)
+                .header("x-api-key", &api_key)
+                .json(&HeartBeatRequest{
+                    agent_id: agent_id.clone(),
+                    resources: Some(report),
+                })
+                .send()
+                .await;
+
+            match resp {
+                Ok(r) if r.status().is_success() => tracing::debug!("heartbeat ok"),
+                Ok(r) => tracing::warn!("heartbeat failed: {}", r.status()),
+                Err(e) => tracing::warn!("heartbeat error: {}", e),
+            }
+            tracing::debug!("heartbeat sent: {}", agent_id);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
 }
