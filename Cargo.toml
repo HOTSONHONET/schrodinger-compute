@@ -1,0 +1,10 @@
+[package]
+name = "schrodinger-compute"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = ["common", "hub", "agent", "ctl"]
+resolver = "2"
+
+[dependencies]
