@@ -13,13 +13,36 @@ use tracing::{info, warn};
 const AUTH_HEADER: &str = "x-api-key";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct ResourceReport {
+struct GpuDevice {
+    name: String,
+    memory_total_mib: u64,
+    memory_used_mib: u64,
+    memory_free_mib: u64,
+    utilization_gpu_pct: u32,
+    temperature_c: Option<u32>,
+    power_draw_w: Option<f32>,
+    power_limit_w: Option<f32>,
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct GpuInfo {
+    kind: String,
+    count: u32,
+    driver_version: Option<String>,
+    cuda_version: Option<String>,
+    gpus: Vec<GpuDevice>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ResourceReport{
     ram_total_mb: u64,
     ram_free_mb: u64,
     cpu_cores: u64,
     disk_free_mb: u64,
     disk_total_mb: u64,
     disk_path: String,
+    gpu: Option<GpuInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
