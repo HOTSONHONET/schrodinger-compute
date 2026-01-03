@@ -1,99 +1,28 @@
+mod types;
+
+use crate::types::*;
+
 use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+use reqwest;
+use axum::extract::Path; 
 
 const AUTH_HEADER: &str = "x-api-key";
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct GpuDevice {
-    name: String,
-    memory_total_mib: u64,
-    memory_used_mib: u64,
-    memory_free_mib: u64,
-    utilization_gpu_pct: u32,
-    temperature_c: Option<u32>,
-    power_draw_w: Option<f32>,
-    power_limit_w: Option<f32>,
-}
-
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct GpuInfo {
-    kind: String,
-    count: u32,
-    driver_version: Option<String>,
-    cuda_version: Option<String>,
-    gpus: Vec<GpuDevice>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct ResourceReport{
-    ram_total_mb: u64,
-    ram_free_mb: u64,
-    cpu_cores: u64,
-    disk_free_mb: u64,
-    disk_total_mb: u64,
-    disk_path: String,
-    gpu: Option<GpuInfo>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum NodeStatus {
-    Up,
-    Down,
-}
-
-#[derive(Debug, Clone)]
-struct NodeState {
-    id: String,
-    url: String,
-    status: NodeStatus,
-    last_seen: DateTime<Utc>,
-    last_error: Option<String>,
-    resources: Option<ResourceReport>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct NodeView {
-    id: String,
-    url: String,
-    status: NodeStatus,
-    last_seen: DateTime<Utc>,
-    last_error: Option<String>,
-    resources: Option<ResourceReport>,
-}
 
 #[derive(Clone)]
 struct AppState {
     api_key: String,
     stale_secs: i64,
     nodes: Arc<RwLock<HashMap<String, NodeState>>>,
-}
-
-#[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: &'static str,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisterRequest {
-    agent_id: String,
-    agent_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeartbeatRequest {
-    agent_id: String,
-    resources: Option<ResourceReport>,
+    sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
 }
 
 // validate api key
@@ -131,6 +60,7 @@ async fn main() {
         api_key,
         stale_secs,
         nodes: Arc::new(RwLock::new(HashMap::new())),
+        sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 
     spawn_stale_marker(state.clone());
@@ -141,6 +71,9 @@ async fn main() {
         .route("/v1/agents/register", post(register_agent))
         .route("/v1/agents/heartbeat", post(heartbeat))
         .route("/v1/nodes", get(list_nodes))
+        .route("/v1/sessions", post(create_session))
+        .route("/v1/sessions", get(list_sessions))
+        .route("/v1/sessions/{id}", axum::routing::delete(delete_session))
         .with_state(state);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse().unwrap();
@@ -257,4 +190,138 @@ async fn list_nodes(State(state): State<AppState>) -> Json<Vec<NodeView>> {
 
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Json(out)
+}
+
+async fn create_session(
+    State(state):  State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CreateSessionRequest>
+) -> Result<Json<SessionRecord>, (StatusCode, String)> {
+
+    check_api_key(&headers, &state.api_key)?;
+
+    let requires_gpu = req.requires_gpu.unwrap_or(false);
+    
+    // picking nodes
+    let nodes_guard = state.nodes.read().await;
+    let node = pick_node(&nodes_guard, requires_gpu).ok_or((StatusCode::SERVICE_UNAVAILABLE, "no eligible nodes".to_string()))?;
+
+    drop(nodes_guard);
+
+    // call agent
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("client build: {}", e)))?;
+
+    let url = format!("{}/v1/sessions/start", node.url);
+    let agent_resp = client
+        .post(&url)
+        .json(&AgentStartSessionRequest{
+            image: req.image.clone(),
+            requires_gpu: Some(requires_gpu),
+            cmd: req.cmd.clone(),
+        })
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("agent unreachable: {}", e)))?;
+    
+    if !agent_resp.status().is_success() {
+        let txt = agent_resp.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("agent error: {}", txt)));
+    }
+
+    let started: AgentStartSessionResponse = agent_resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("bad agent json: {}", e)))?;
+
+    let record = SessionRecord {
+        session_id: started.session_id.clone(),
+        node_id: node.id.clone(),
+        agent_url: node.url.clone(),
+        container_id: started.container_id.clone(),
+        image: req.image.clone(),
+        requires_gpu: requires_gpu,
+        created_at: Utc::now(),
+    };
+
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(record.session_id.clone(), record.clone());
+    }
+
+    return Ok(Json(record));
+}
+
+
+async fn list_sessions(
+    State(state): State<AppState>
+) -> Json<Vec<SessionRecord>> {
+    let sessions = state.sessions.read().await;
+    let mut out: Vec<SessionRecord> = sessions.values().cloned().collect();
+    out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    return Json(out);
+}
+
+async fn delete_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+
+    check_api_key(&headers, &state.api_key)?;   
+
+    // find session
+    let rec = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&id).cloned().ok_or((StatusCode::NOT_FOUND, "unknown session_id".to_string()))?
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("client build: {}", e)))?;
+
+    let stop_url = format!("{}/v1/sessions/stop", rec.agent_url);
+
+    let resp = client
+        .post(&stop_url)
+        .json(&AgentStopReq {session_id: &id})
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("agent unreachable: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let txt = resp.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("agent stop failed: {}", txt)));
+    }
+
+    // Remove from session
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.remove(&id);
+    }
+
+    return Ok(StatusCode::OK);
+
+}
+
+// Picking the node with highest available RAM
+fn pick_node(nodes: &HashMap<String, NodeState>, requires_gpu: bool) -> Option<NodeState> {
+    let mut candidates: Vec<&NodeState> = nodes.values()
+        .filter(|n| matches!(n.status, NodeStatus::Up))
+        .filter(|n| {
+            if !requires_gpu {
+                return true;
+            }
+            return n.resources.as_ref().and_then(|r| r.gpu.as_ref()).is_some();
+        })
+        .collect();
+
+    candidates.sort_by_key(|n| {
+        return n.resources.as_ref().map(|r| r.ram_free_mb).unwrap_or(0);
+    });
+
+    return candidates.last().cloned().cloned();
 }

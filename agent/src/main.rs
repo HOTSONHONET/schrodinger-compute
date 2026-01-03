@@ -18,6 +18,23 @@ struct AppState {
     disk_path: PathBuf,
 }
 
+fn build_agent(state: AppState, session_store: SessionStore) -> Router {
+    let sessions_api = Router::new()
+        .route("/v1/sessions/start", post(start_session))
+        .route("/v1/sessions/stop", post(stop_session))
+        .route("/v1/sessions", get(list_sessions))
+        .with_state(session_store);
+
+    let app = Router::new()
+        .route("/ping", get(ping))
+        .route("/health", get(health))
+        .route("/v1/resources", get(resources))
+        .merge(sessions_api)
+        .with_state(state);
+
+    return app;
+}
+
 #[tokio::main]
 async fn main(){
     tracing_subscriber::fmt().init();
@@ -75,24 +92,13 @@ async fn main(){
         tracing::warn!("HUB_URL/HUB_API_KEY/AGENT_ID/AGENT_PUBLIC_URL not set; skipping hub discovery");
     }
 
-    let sessions_api = Router::new()
-        .route("/v1/sessions/start", post(start_session))
-        .route("/v1/sessions/stop", post(stop_session))
-        .route("/v1/sessions", get(list_sessions))
-        .with_state(session_store);
-
-    let app = Router::new()
-        .route("/ping", get(ping))
-        .route("/health", get(health))
-        .route("/v1/resources", get(resources))
-        .merge(sessions_api)
-        .with_state(state);
+    let agent = build_agent(state, session_store);
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse().unwrap();
     info!("agent listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, agent).await.unwrap();
 }
 
 async fn ping() -> &'static str {
