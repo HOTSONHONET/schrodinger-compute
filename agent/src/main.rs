@@ -4,14 +4,41 @@ mod sessions;
 
 use crate::gpu::detect_nvidia_gpu;
 use crate::sessions::{SessionStore, start_session, stop_session, list_sessions};
-use crate::types::{HealthResponse, RegisterRequest, ResourceReport, HeartBeatRequest};
+use crate::types::*;
 
-use axum::{extract::State, routing::{get, post}, Json, Router};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use axum::{
+    extract::{
+        Path,
+        State,
+        ws::{
+            WebSocketUpgrade,
+            WebSocket,
+            Message,
+        }
+    }, 
+    response::IntoResponse,
+    routing::{get, post}, Json, Router,
+    body::Bytes,
+};
+use portable_pty::{
+    native_pty_system,
+    CommandBuilder,
+    PtySize,
+};
+use std::{
+    collections::HashMap, 
+    net::SocketAddr, 
+    path::PathBuf, 
+    sync::Arc, 
+    io::{Read, Write},
+};
+use futures_util::{
+    StreamExt,
+    SinkExt,
+};
 use sysinfo::{Disks, System};
 use tracing::info;
-use tokio::sync::RwLock;
-
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Clone)]
 struct AppState {
@@ -23,6 +50,7 @@ fn build_agent(state: AppState, session_store: SessionStore) -> Router {
         .route("/v1/sessions/start", post(start_session))
         .route("/v1/sessions/stop", post(stop_session))
         .route("/v1/sessions", get(list_sessions))
+        .route("/v1/sessions/{id}/ws", get(ws_attach_terminal))
         .with_state(session_store);
 
     let app = Router::new()
@@ -236,5 +264,144 @@ fn spawn_hub_register_and_heartbeat (
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
+}
+
+
+pub async fn ws_attach_terminal (
+    ws: WebSocketUpgrade,
+    State(store): State<SessionStore>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+
+    // Find container id
+    let container_id = {
+        let sessions = store.sessions.read().await;
+        match sessions.get(&session_id) {
+            Some(info) => info.container_id.clone(),
+            None => return (
+                axum::http::StatusCode::NOT_FOUND,
+                "unknown session id"
+            ).into_response(),
+        }
+    };
+
+    return ws.on_upgrade(move |socket| async move {
+        if let Err(e) = handle_terminal_ws(socket, container_id).await {
+            tracing::warn!("terminal ws ended: {:?}", e);
+        }
+    });
+}
+
+async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyhow::Result<()> {
+    // Create PTY
+    let pty_system = native_pty_system();
+    let mut pair = pty_system.openpty(PtySize {
+        rows: 24, cols: 80, pixel_width: 0, pixel_height: 0,
+    })?;
+
+    // Spawn docker exec inside the PTY, so that it can behave like real terminal
+    let mut cmd = CommandBuilder::new("docker");
+    cmd.args([
+        "exec", "-it", &container_id,
+        "sh", "-lc",
+        "export TERM=xterm-256color; exec sh"
+    ]);
+
+    let mut child = pair.slave.spawn_command(cmd)?;
+    drop(pair.slave); // keeping only master on the server side
+
+    // Pump: PTY -> Websocket
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // channels
+    // PTY -> WS
+    let (pty_out_tx, mut pty_out_rx) = mpsc::channel::<Vec<u8>>(64);
+
+    // WS -> PTY
+    let (pty_in_tx, mut pty_in_rx) = mpsc::channel::<Vec<u8>>(64);
+
+    // PTY Reader (blocking) -> pty_out_tx
+    let mut reader = pair.master.try_clone_reader()?;
+    let pty_read_task = tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if pty_out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                },
+                Err(_) => break,
+            }
+        }
+    });
+
+    // PTY writer (blocking) <- pty_in_rx
+    let mut writer = pair.master.take_writer()?;
+    let pty_write_task = tokio::task::spawn_blocking(move || {
+        while let Some(data) = pty_in_rx.blocking_recv() {
+            if writer.write_all(&data).is_err() {
+                break;
+            }
+
+            let _ = writer.flush();
+        }
+    });
+
+    // Async task: pty_out_rx -> ws_tx
+    let ws_write_task = tokio::spawn(async move {
+        while let Some(chunk) = pty_out_rx.recv().await {
+            if ws_tx.send(Message::Binary(chunk.into())).await.is_err(){
+                break;
+            }
+        }
+    });
+
+    // Pump: Websocket -> PTY
+    while let Some(next) = ws_rx.next().await {
+        let msg = match next {
+            Ok(m) => m,
+            Err(_) => break,  
+        };
+        
+        match msg {
+            Message::Binary(data) => {
+                // writing to blocking thread
+                if pty_in_tx.send(data.to_vec()).await.is_err() {
+                    break;
+                }
+            }
+
+            Message::Text(text) => {
+                if let Ok(ctrl) = serde_json::from_str::<ControlMsg>(&text) {
+                    if let ControlMsg::Resize  {cols, rows} = ctrl {
+                        let _ = pair.master.resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                }else{
+                    let mut bytes = text.as_bytes().to_vec();
+                    bytes.push(b'\n');
+                    let _ = pty_in_tx.send(bytes).await;
+                }
+            }
+
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // Cleaning up mess
+    let _ = child.kill();
+    drop(pty_in_tx);
+    ws_write_task.abort();
+    pty_read_task.abort();
+    let _ = pty_write_task.await;
+
+    return Ok(());
 }
 

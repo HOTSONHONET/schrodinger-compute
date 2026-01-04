@@ -85,3 +85,10 @@ pub struct SessionView {
 pub struct ListSessionsResponse {
     pub sessions: Vec<SessionView>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum ControlMsg {
+    #[serde(rename = "resize")]
+    Resize { cols: u16, rows: u16}
+}

@@ -244,6 +244,7 @@ async fn create_session(
         image: req.image.clone(),
         requires_gpu: requires_gpu,
         created_at: Utc::now(),
+        running_for_secs: 0,
     };
 
     {

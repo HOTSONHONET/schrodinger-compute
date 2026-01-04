@@ -81,6 +81,7 @@ pub struct SessionRecord {
     pub image: String,
     pub requires_gpu: bool,
     pub created_at: DateTime<Utc>,
+    pub running_for_secs: i64,
 }
 
 #[derive(Debug, Serialize)]
