@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 use reqwest;
 use axum::extract::Path; 
+use tower_http::cors::CorsLayer;
 
 const AUTH_HEADER: &str = "x-api-key";
 
@@ -70,11 +71,12 @@ async fn main() {
         .route("/health", get(health))
         .route("/v1/agents/register", post(register_agent))
         .route("/v1/agents/heartbeat", post(heartbeat))
-        .route("/v1/nodes", get(list_nodes))
+        .route("/v1/agents", get(list_agents))
         .route("/v1/sessions", post(create_session))
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/{id}", axum::routing::delete(delete_session))
-        .with_state(state);
+        .with_state(state)
+        .layer(CorsLayer::permissive());
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse().unwrap();
     info!("hub listening on http://{}", addr);
@@ -173,7 +175,7 @@ async fn heartbeat(
     Ok(StatusCode::OK)
 }
 
-async fn list_nodes(State(state): State<AppState>) -> Json<Vec<NodeView>> {
+async fn list_agents(State(state): State<AppState>) -> Json<Vec<NodeView>> {
     let nodes = state.nodes.read().await;
 
     let mut out: Vec<NodeView> = nodes

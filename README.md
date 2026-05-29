@@ -37,3 +37,36 @@ Connect homie nodes to one unified compute platform
 └──────────────────────────────────────────┘
 
 ```
+
+
+# How to setup (dev)
+
+## Run the agent in homie-nodes
+
+```bash
+
+cargo run -p agent
+
+
+```
+
+
+## Run the hub (Should be first)
+
+
+```bash
+
+
+cargo run -p hub
+
+```
+
+
+
+## Run the UI
+
+```bash
+
+cd desktop && npm run tauri dev
+
+```
