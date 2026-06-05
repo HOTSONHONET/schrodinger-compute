@@ -158,6 +158,24 @@ async fn register_agent(
         info!("agent registered: {} -> {}", req.agent_id, req.agent_url);
     }
 
+    db::upsert_agent(
+        &state.db,
+        &req.agent_id,
+        &req.agent_url,
+        "UP",
+        &now.to_rfc3339(),
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("failed to persist agent registration: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to persist agent registration".to_string(),
+        )
+    })?;
+
     Ok(StatusCode::OK)
 }
 
@@ -180,6 +198,24 @@ async fn heartbeat(
     if let Some(r) = req.resources {
         n.resources = Some(r);
     }
+
+    db::upsert_agent(
+        &state.db,
+        &n.id,
+        &n.url,
+        "UP",
+        &n.last_seen.to_rfc3339(),
+        None,
+        n.resources.as_ref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("failed to persist agent heartbeat: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to persist agent heartbeat".to_string(),
+        )
+    })?;
 
     Ok(StatusCode::OK)
 }

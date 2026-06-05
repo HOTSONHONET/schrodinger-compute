@@ -1,44 +1,33 @@
-mod types;
 mod gpu;
 mod sessions;
+mod types;
 
 use crate::gpu::detect_nvidia_gpu;
-use crate::sessions::{SessionStore, start_session, stop_session, list_sessions};
+use crate::sessions::{SessionStore, list_sessions, start_session, stop_session};
 use crate::types::*;
 
 use axum::{
-    extract::{
-        Path,
-        State,
-        ws::{
-            WebSocketUpgrade,
-            WebSocket,
-            Message,
-        }
-    }, 
-    response::IntoResponse,
-    routing::{get, post}, Json, Router,
+    Json, Router,
     body::Bytes,
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::IntoResponse,
+    routing::{get, post},
 };
-use portable_pty::{
-    native_pty_system,
-    CommandBuilder,
-    PtySize,
-};
+use futures_util::{SinkExt, StreamExt};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
-    collections::HashMap, 
-    net::SocketAddr, 
-    path::PathBuf, 
-    sync::Arc, 
+    collections::HashMap,
     io::{Read, Write},
-};
-use futures_util::{
-    StreamExt,
-    SinkExt,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
 };
 use sysinfo::{Disks, System};
-use tracing::info;
 use tokio::sync::{RwLock, mpsc};
+use tracing::info;
 
 #[derive(Clone)]
 struct AppState {
@@ -64,7 +53,7 @@ fn build_agent(state: AppState, session_store: SessionStore) -> Router {
 }
 
 #[tokio::main]
-async fn main(){
+async fn main() {
     tracing_subscriber::fmt().init();
 
     // Loading env variables
@@ -72,25 +61,36 @@ async fn main(){
 
     // Loading Config
     let host = std::env::var("AGENT_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = std::env::var("AGENT_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(7001);
-    let hub_url = std::env::var("HUB_URL").ok();
+    let port: u16 = std::env::var("AGENT_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7001);
+    let hub_url = std::env::var("HUB_PUBLIC_URL").ok();
     let hub_api_key = std::env::var("HUB_API_KEY").ok();
     let agent_id = std::env::var("AGENT_ID").ok();
     let agent_public_url = std::env::var("AGENT_PUBLIC_URL").ok();
 
-    let disk_path_raw  = std::env::var("AGENT_DISK_PATH").unwrap_or_else(|_| "/".to_string());
+    let disk_path_raw = std::env::var("AGENT_DISK_PATH").unwrap_or_else(|_| "/".to_string());
 
     let disk_path = PathBuf::from(disk_path_raw);
 
     // Ensure disk path exist
     if let Err(e) = std::fs::create_dir_all(&disk_path) {
-        panic!("Failed to create the AGENT_DISK_PATH dir : {} | Error: {}", disk_path.display(), e);
+        panic!(
+            "Failed to create the AGENT_DISK_PATH dir : {} | Error: {}",
+            disk_path.display(),
+            e
+        );
     }
 
     // Convert relative disk path to from root path
     let disk_path = match disk_path.canonicalize() {
         Ok(p) => p,
-        Err(e) => panic!("failed to canonicalize disk path: {} | Error: {}", disk_path.display(), e),
+        Err(e) => panic!(
+            "failed to canonicalize disk path: {} | Error: {}",
+            disk_path.display(),
+            e
+        ),
     };
 
     let session_store = SessionStore {
@@ -102,13 +102,9 @@ async fn main(){
     };
 
     // Launching heartbeat and request registering
-    if let (
-        Some(hub_url), 
-        Some(hub_api_key),
-        Some(agent_id),
-        Some(agent_public_url)
-    ) = (hub_url, hub_api_key, agent_id, agent_public_url) {
-        
+    if let (Some(hub_url), Some(hub_api_key), Some(agent_id), Some(agent_public_url)) =
+        (hub_url, hub_api_key, agent_id, agent_public_url)
+    {
         spawn_hub_register_and_heartbeat(
             hub_url,
             hub_api_key,
@@ -116,8 +112,10 @@ async fn main(){
             agent_public_url,
             state.clone(),
         );
-    }else{
-        tracing::warn!("HUB_URL/HUB_API_KEY/AGENT_ID/AGENT_PUBLIC_URL not set; skipping hub discovery");
+    } else {
+        tracing::warn!(
+            "HUB_URL/HUB_API_KEY/AGENT_ID/AGENT_PUBLIC_URL not set; skipping hub discovery"
+        );
     }
 
     let agent = build_agent(state, session_store);
@@ -134,7 +132,7 @@ async fn ping() -> &'static str {
 }
 
 async fn health() -> Json<HealthResponse> {
-    return Json(HealthResponse { status: "ok" })
+    return Json(HealthResponse { status: "ok" });
 }
 
 async fn resources(State(state): State<AppState>) -> Json<ResourceReport> {
@@ -154,14 +152,14 @@ async fn collect_resources(state: &AppState) -> ResourceReport {
 
     let gpu = detect_nvidia_gpu();
 
-    return ResourceReport { 
-        ram_total_mb, 
-        ram_free_mb, 
+    return ResourceReport {
+        ram_total_mb,
+        ram_free_mb,
         cpu_cores,
-        disk_free_mb, 
-        disk_total_mb, 
+        disk_free_mb,
+        disk_total_mb,
         disk_path: state.disk_path.display().to_string(),
-        gpu: gpu
+        gpu: gpu,
     };
 }
 
@@ -189,8 +187,8 @@ fn disk_stats_for_path(path: &PathBuf) -> (u64, u64) {
     }
 
     if let Some((_len, avail, total)) = best {
-        return (avail, total)
-    }else {
+        return (avail, total);
+    } else {
         return (0, 0);
     }
 }
@@ -203,26 +201,26 @@ fn bytes_to_mb(bytes: u64) -> u64 {
     return bytes / (1 << 20);
 }
 
-fn spawn_hub_register_and_heartbeat (
+fn spawn_hub_register_and_heartbeat(
     hub_url: String,
     api_key: String,
     agent_id: String,
     agent_public_url: String,
-    state: AppState
- ) {
+    state: AppState,
+) {
     tokio::spawn(async move {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("reqwest client");
-        
+
         // Register client with retries
         let register_url = format!("{}/v1/agents/register", hub_url);
         loop {
             let resp = client
                 .post(&register_url)
                 .header("x-api-key", &api_key)
-                .json(&RegisterRequest{
+                .json(&RegisterRequest {
                     agent_id: agent_id.clone(),
                     agent_url: agent_public_url.clone(),
                 })
@@ -248,7 +246,7 @@ fn spawn_hub_register_and_heartbeat (
             let resp = client
                 .post(&heartbeat_url)
                 .header("x-api-key", &api_key)
-                .json(&HeartBeatRequest{
+                .json(&HeartBeatRequest {
                     agent_id: agent_id.clone(),
                     resources: Some(report),
                 })
@@ -266,22 +264,19 @@ fn spawn_hub_register_and_heartbeat (
     });
 }
 
-
-pub async fn ws_attach_terminal (
+pub async fn ws_attach_terminal(
     ws: WebSocketUpgrade,
     State(store): State<SessionStore>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-
     // Find container id
     let container_id = {
         let sessions = store.sessions.read().await;
         match sessions.get(&session_id) {
             Some(info) => info.container_id.clone(),
-            None => return (
-                axum::http::StatusCode::NOT_FOUND,
-                "unknown session id"
-            ).into_response(),
+            None => {
+                return (axum::http::StatusCode::NOT_FOUND, "unknown session id").into_response();
+            }
         }
     };
 
@@ -292,19 +287,25 @@ pub async fn ws_attach_terminal (
     });
 }
 
-async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyhow::Result<()> {
+async fn handle_terminal_ws(mut socket: WebSocket, container_id: String) -> anyhow::Result<()> {
     // Create PTY
     let pty_system = native_pty_system();
     let mut pair = pty_system.openpty(PtySize {
-        rows: 24, cols: 80, pixel_width: 0, pixel_height: 0,
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
     })?;
 
     // Spawn docker exec inside the PTY, so that it can behave like real terminal
     let mut cmd = CommandBuilder::new("docker");
     cmd.args([
-        "exec", "-it", &container_id,
-        "sh", "-lc",
-        "export TERM=xterm-256color; exec sh"
+        "exec",
+        "-it",
+        &container_id,
+        "sh",
+        "-lc",
+        "export TERM=xterm-256color; exec sh",
     ]);
 
     let mut child = pair.slave.spawn_command(cmd)?;
@@ -331,7 +332,7 @@ async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyho
                     if pty_out_tx.blocking_send(buf[..n].to_vec()).is_err() {
                         break;
                     }
-                },
+                }
                 Err(_) => break,
             }
         }
@@ -352,7 +353,7 @@ async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyho
     // Async task: pty_out_rx -> ws_tx
     let ws_write_task = tokio::spawn(async move {
         while let Some(chunk) = pty_out_rx.recv().await {
-            if ws_tx.send(Message::Binary(chunk.into())).await.is_err(){
+            if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
                 break;
             }
         }
@@ -362,9 +363,9 @@ async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyho
     while let Some(next) = ws_rx.next().await {
         let msg = match next {
             Ok(m) => m,
-            Err(_) => break,  
+            Err(_) => break,
         };
-        
+
         match msg {
             Message::Binary(data) => {
                 // writing to blocking thread
@@ -375,7 +376,7 @@ async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyho
 
             Message::Text(text) => {
                 if let Ok(ctrl) = serde_json::from_str::<ControlMsg>(&text) {
-                    if let ControlMsg::Resize  {cols, rows} = ctrl {
+                    if let ControlMsg::Resize { cols, rows } = ctrl {
                         let _ = pair.master.resize(PtySize {
                             rows,
                             cols,
@@ -383,7 +384,7 @@ async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyho
                             pixel_height: 0,
                         });
                     }
-                }else{
+                } else {
                     let mut bytes = text.as_bytes().to_vec();
                     bytes.push(b'\n');
                     let _ = pty_in_tx.send(bytes).await;
@@ -404,4 +405,3 @@ async fn handle_terminal_ws(mut socket: WebSocket, container_id:String) -> anyho
 
     return Ok(());
 }
-
