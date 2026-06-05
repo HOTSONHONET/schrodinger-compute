@@ -2,24 +2,35 @@ import { useEffect, useState } from "react";
 import { getAgents } from "./api/hub";
 import "./App.css";
 
+type GpuDevice = {
+  name: string;
+  memory_total_mib: number;
+  memory_used_mib: number;
+  memory_free_mib: number;
+  utilization_gpu_pct: number;
+  temperature_c?: number;
+  power_draw_w?: number | null;
+  power_limit_w?: number | null;
+};
+
 type Agent = {
   id: string;
   url: string;
   status: string;
   last_seen?: string;
   resources?: {
+    ram_total_mb?: number;
+    ram_free_mb?: number;
     cpu_cores?: number;
-    memory_total_mb?: number;
-    memory_used_mb?: number;
     disk_total_mb?: number;
     disk_free_mb?: number;
+    disk_path?: string;
     gpu?: {
-      name?: string;
-      memory_total_mb?: number;
-      memory_used_mb?: number;
-      utilization_percent?: number;
-      temperature_c?: number;
-      power_draw_w?: number;
+      kind: string;
+      count: number;
+      driver_version?: string;
+      cuda_version?: string;
+      gpus: GpuDevice[];
     };
   };
 };
@@ -128,7 +139,7 @@ function App() {
                     <div className="gpuDetails">
                       <span>Util: {gpu.utilization_gpu_pct}%</span>
                       <span>Temp: {gpu.temperature_c}°C</span>
-                      <span>Power: {gpu.power_draw_wx}W</span>
+                      <span>Power: {gpu.power_draw_w ?? "-"}W</span>
                     </div>
                   </div>
                 )}
