@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-
-#[derive(Debug, Serialize, Deserialize, Clone )]
-struct GpuDevice {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GpuDevice {
     pub name: String,
     pub memory_total_mib: u64,
     pub memory_used_mib: u64,
@@ -13,7 +12,6 @@ struct GpuDevice {
     pub power_draw_w: Option<f32>,
     pub power_limit_w: Option<f32>,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GpuInfo {
@@ -25,7 +23,7 @@ pub struct GpuInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ResourceReport{
+pub struct ResourceReport {
     pub ram_total_mb: u64,
     pub ram_free_mb: u64,
     pub cpu_cores: u64,
@@ -62,15 +60,12 @@ pub struct NodeView {
     pub resources: Option<ResourceReport>,
 }
 
-
-
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
     pub image: String,
     pub requires_gpu: Option<bool>,
     pub cmd: Option<Vec<String>>,
 }
-
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SessionRecord {
@@ -100,7 +95,6 @@ pub struct HeartbeatRequest {
     pub agent_id: String,
     pub resources: Option<ResourceReport>,
 }
-
 
 #[derive(Debug, Serialize)]
 pub struct AgentStartSessionRequest {

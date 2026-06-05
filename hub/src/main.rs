@@ -1,7 +1,10 @@
+mod db;
 mod types;
 
 use crate::types::*;
+use sqlx::SqlitePool;
 
+use axum::extract::Path;
 use axum::{
     Json, Router,
     extract::State,
@@ -9,12 +12,11 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use reqwest;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
-use reqwest;
-use axum::extract::Path; 
 use tower_http::cors::CorsLayer;
+use tracing::{info, warn};
 
 const AUTH_HEADER: &str = "x-api-key";
 
@@ -22,6 +24,7 @@ const AUTH_HEADER: &str = "x-api-key";
 struct AppState {
     api_key: String,
     stale_secs: i64,
+    db: SqlitePool,
     nodes: Arc<RwLock<HashMap<String, NodeState>>>,
     sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
 }
@@ -40,7 +43,7 @@ fn check_api_key(headers: &HeaderMap, expected: &str) -> Result<(), (StatusCode,
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
     dotenvy::dotenv().ok();
 
@@ -57,9 +60,13 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(8);
 
+    // connecting to db instance with mode = read + write + create
+    let db_pool = db::init_db("sqlite://schrodinger.db?mode=rwc").await?;
+
     let state = AppState {
         api_key,
         stale_secs,
+        db: db_pool,
         nodes: Arc::new(RwLock::new(HashMap::new())),
         sessions: Arc::new(RwLock::new(HashMap::new())),
     };
@@ -83,6 +90,8 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+
+    return Ok(());
 }
 
 fn spawn_stale_marker(state: AppState) {
@@ -195,18 +204,20 @@ async fn list_agents(State(state): State<AppState>) -> Json<Vec<NodeView>> {
 }
 
 async fn create_session(
-    State(state):  State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateSessionRequest>
+    Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<SessionRecord>, (StatusCode, String)> {
-
     check_api_key(&headers, &state.api_key)?;
 
     let requires_gpu = req.requires_gpu.unwrap_or(false);
-    
+
     // picking nodes
     let nodes_guard = state.nodes.read().await;
-    let node = pick_node(&nodes_guard, requires_gpu).ok_or((StatusCode::SERVICE_UNAVAILABLE, "no eligible nodes".to_string()))?;
+    let node = pick_node(&nodes_guard, requires_gpu).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no eligible nodes".to_string(),
+    ))?;
 
     drop(nodes_guard);
 
@@ -214,12 +225,17 @@ async fn create_session(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("client build: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("client build: {}", e),
+            )
+        })?;
 
     let url = format!("{}/v1/sessions/start", node.url);
     let agent_resp = client
         .post(&url)
-        .json(&AgentStartSessionRequest{
+        .json(&AgentStartSessionRequest {
             image: req.image.clone(),
             requires_gpu: Some(requires_gpu),
             cmd: req.cmd.clone(),
@@ -227,7 +243,7 @@ async fn create_session(
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("agent unreachable: {}", e)))?;
-    
+
     if !agent_resp.status().is_success() {
         let txt = agent_resp.text().await.unwrap_or_default();
         return Err((StatusCode::BAD_GATEWAY, format!("agent error: {}", txt)));
@@ -257,10 +273,7 @@ async fn create_session(
     return Ok(Json(record));
 }
 
-
-async fn list_sessions(
-    State(state): State<AppState>
-) -> Json<Vec<SessionRecord>> {
+async fn list_sessions(State(state): State<AppState>) -> Json<Vec<SessionRecord>> {
     let sessions = state.sessions.read().await;
     let mut out: Vec<SessionRecord> = sessions.values().cloned().collect();
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -272,32 +285,42 @@ async fn delete_session(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-
-    check_api_key(&headers, &state.api_key)?;   
+    check_api_key(&headers, &state.api_key)?;
 
     // find session
     let rec = {
         let sessions = state.sessions.read().await;
-        sessions.get(&id).cloned().ok_or((StatusCode::NOT_FOUND, "unknown session_id".to_string()))?
+        sessions
+            .get(&id)
+            .cloned()
+            .ok_or((StatusCode::NOT_FOUND, "unknown session_id".to_string()))?
     };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("client build: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("client build: {}", e),
+            )
+        })?;
 
     let stop_url = format!("{}/v1/sessions/stop", rec.agent_url);
 
     let resp = client
         .post(&stop_url)
-        .json(&AgentStopReq {session_id: &id})
+        .json(&AgentStopReq { session_id: &id })
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("agent unreachable: {}", e)))?;
 
     if !resp.status().is_success() {
         let txt = resp.text().await.unwrap_or_default();
-        return Err((StatusCode::BAD_GATEWAY, format!("agent stop failed: {}", txt)));
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("agent stop failed: {}", txt),
+        ));
     }
 
     // Remove from session
@@ -307,12 +330,12 @@ async fn delete_session(
     }
 
     return Ok(StatusCode::OK);
-
 }
 
 // Picking the node with highest available RAM
 fn pick_node(nodes: &HashMap<String, NodeState>, requires_gpu: bool) -> Option<NodeState> {
-    let mut candidates: Vec<&NodeState> = nodes.values()
+    let mut candidates: Vec<&NodeState> = nodes
+        .values()
         .filter(|n| matches!(n.status, NodeStatus::Up))
         .filter(|n| {
             if !requires_gpu {

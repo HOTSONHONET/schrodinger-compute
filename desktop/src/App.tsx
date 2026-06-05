@@ -128,7 +128,7 @@ function App() {
                     <div className="gpuDetails">
                       <span>Util: {gpu.utilization_gpu_pct}%</span>
                       <span>Temp: {gpu.temperature_c}°C</span>
-                      <span>Power: {gpu.power_draw_w}W</span>
+                      <span>Power: {gpu.power_draw_wx}W</span>
                     </div>
                   </div>
                 )}

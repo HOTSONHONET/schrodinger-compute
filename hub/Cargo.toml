@@ -12,5 +12,16 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 dotenvy = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 tower-http = { version = "0.6", features = ["cors"] }
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "json",
+] }
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1.0"
