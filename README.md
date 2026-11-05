@@ -70,3 +70,12 @@ cargo run -p hub
 cd desktop && npm run tauri dev
 
 ```
+
+## Distributed session direction
+
+The original resource-unification goal and its implementation milestones are
+specified in [the distributed-session RFC](docs/distributed-session-rfc.md).
+A separate [two-worker prototype](experiments/distributed-session/README.md)
+verifies shared-workspace visibility and partitions one CPU computation across
+both workers. It does not yet provide distributed shared memory or a unified
+Linux kernel. The existing Rust session APIs are unchanged.
