@@ -1,0 +1,24 @@
+# Run one copy on each machine. SC_WORKSPACE_HOST must already be a directory
+# on the same NFS export, accessible to UID 1000 on both hosts.
+services:
+  worker:
+    build: .
+    ports:
+      - "${SC_BIND_IP:-127.0.0.1}:7351:7351"
+    environment:
+      SC_NODE_ID: "${SC_NODE_ID:?Set a unique node ID}"
+      SC_TOKEN: "${SC_TOKEN:?Set the same random token on both workers}"
+    volumes:
+      - type: bind
+        source: "${SC_WORKSPACE_HOST:?Set an existing shared workspace path}"
+        target: /workspace
+        bind:
+          create_host_path: false
+    cpus: 2.0
+    mem_limit: 512m
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
