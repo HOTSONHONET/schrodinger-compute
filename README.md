@@ -79,3 +79,8 @@ A separate [two-worker prototype](experiments/distributed-session/README.md)
 verifies shared-workspace visibility and partitions one CPU computation across
 both workers. It does not yet provide distributed shared memory or a unified
 Linux kernel. The existing Rust session APIs are unchanged.
+
+The [unified-session experiment](experiments/unified-session/README.md) adds a
+session CLI with striped files, byte-addressed RAM across workers, and compute
+on shard owners. It runs independently of the Rust services and needs no shared
+NFS mount.
