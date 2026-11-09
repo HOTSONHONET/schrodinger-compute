@@ -1,0 +1,14 @@
+services:
+  worker:
+    build: .
+    ports:
+      - "${SC_BIND_IP:-127.0.0.1}:7353:7353"
+    environment:
+      SC_NODE_ID: "${SC_NODE_ID:?Set a unique node ID}"
+      SC_TOKEN: "${SC_TOKEN:?Set a shared random token}"
+    volumes:
+      - data:/data
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  data:
