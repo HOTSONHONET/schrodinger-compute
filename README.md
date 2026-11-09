@@ -2,6 +2,13 @@
 
 Connect homie nodes to one unified compute platform
 
+## Interactive codebase flowchart
+
+Open [docs/codebase-flow.html](docs/codebase-flow.html) in a browser to explore the
+system overview, resource reporting, session scheduling, terminal attach, and
+source/state map. Select components for source links and implementation notes.
+The file works offline and includes search, zoom, and print-to-PDF controls.
+
 
 ## Basic design
 
